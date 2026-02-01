@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"net/smtp"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -27,13 +27,81 @@ import (
 var db *sql.DB
 var jwtSecret = []byte("your-secret-key-change-in-production")
 
-// Rate limiters for different endpoints
+// Rate limiters for different endpoints with automatic cleanup
 var (
-	// 5 requests per minute per IP for login/register
-	loginLimiter = make(map[string]*rate.Limiter)
-	// 10 requests per minute per IP for tweets
-	tweetLimiter = make(map[string]*rate.Limiter)
+	loginLimiter = &rateLimiterManager{
+		limiters: make(map[string]*rateLimiterEntry),
+		rate:     rate.Every(12 * time.Second), // 5 requests per minute
+		burst:    1,
+	}
+	tweetLimiter = &rateLimiterManager{
+		limiters: make(map[string]*rateLimiterEntry),
+		rate:     rate.Every(1 * time.Second), // 60 requests per minute
+		burst:    1,
+	}
 )
+
+type rateLimiterEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+type rateLimiterManager struct {
+	limiters map[string]*rateLimiterEntry
+	mu       sync.RWMutex
+	rate     rate.Limit
+	burst    int
+}
+
+// cleanupOldLimiters removes limiters that haven't been used in 1 hour
+func (rlm *rateLimiterManager) cleanupOldLimiters() {
+	rlm.mu.Lock()
+	defer rlm.mu.Unlock()
+
+	cutoff := time.Now().Add(-1 * time.Hour)
+	for ip, entry := range rlm.limiters {
+		if entry.lastSeen.Before(cutoff) {
+			delete(rlm.limiters, ip)
+		}
+	}
+}
+
+// getLimiter gets or creates a rate limiter for an IP
+func (rlm *rateLimiterManager) getLimiter(ip string) *rate.Limiter {
+	rlm.mu.Lock()
+	defer rlm.mu.Unlock()
+
+	entry, exists := rlm.limiters[ip]
+	if !exists {
+		entry = &rateLimiterEntry{
+			limiter:  rate.NewLimiter(rlm.rate, rlm.burst),
+			lastSeen: time.Now(),
+		}
+		rlm.limiters[ip] = entry
+	} else {
+		entry.lastSeen = time.Now()
+	}
+
+	return entry.limiter
+}
+
+// allow checks if request is allowed
+func (rlm *rateLimiterManager) allow(ip string) bool {
+	limiter := rlm.getLimiter(ip)
+	return limiter.Allow()
+}
+
+// startCleanupRoutine starts background cleanup of old rate limiters
+func startCleanupRoutine() {
+	ticker := time.NewTicker(15 * time.Minute)
+	go func() {
+		for range ticker.C {
+			loginLimiter.cleanupOldLimiters()
+			tweetLimiter.cleanupOldLimiters()
+			log.Println("✅ Rate limiter cleanup completed")
+		}
+	}()
+}
 
 type User struct {
 	ID           int       `json:"id"`
@@ -140,7 +208,14 @@ func generateMFAToken(secret string) string {
 	if num < 0 {
 		num = -num
 	}
-	return fmt.Sprintf("%06d", num%1000000)
+	return string([]byte{
+		'0' + byte((num/100000)%10),
+		'0' + byte((num/10000)%10),
+		'0' + byte((num/1000)%10),
+		'0' + byte((num/100)%10),
+		'0' + byte((num/10)%10),
+		'0' + byte(num%10),
+	})
 }
 
 func generateResetToken() string {
@@ -163,22 +238,17 @@ func sendMFAEmail(email, mfaCode string) error {
 	smtpPassword := os.Getenv("SMTP_PASSWORD")
 	smtpFrom := os.Getenv("SMTP_FROM")
 
-	// If email config not set, return error
+	// If email config not set, return error - no console fallback
 	if smtpHost == "" || smtpUser == "" || smtpPassword == "" {
-		return fmt.Errorf("SMTP not configured - cannot send MFA email")
+		return &smtpConfigError{message: "SMTP not configured"}
 	}
 
 	// Compose email
 	subject := "Your MFA Code"
-	body := fmt.Sprintf(`
-Your MFA authentication code is: %s
-
-This code will expire in 30 seconds.
-
-Do not share this code with anyone.
-
-If you did not request this code, please ignore this email.
-`, mfaCode)
+	body := "Your MFA authentication code is: " + mfaCode + "\n\n" +
+		"This code will expire in 30 seconds.\n\n" +
+		"Do not share this code with anyone.\n\n" +
+		"If you did not request this code, please ignore this email."
 
 	// Create email message
 	from := mail.Address{Name: "Twitter Clone", Address: smtpFrom}
@@ -195,7 +265,7 @@ If you did not request this code, please ignore this email.
 	// Build message
 	message := ""
 	for k, v := range headers {
-		message += fmt.Sprintf("%s: %s\r\n", k, v)
+		message += k + ": " + v + "\r\n"
 	}
 	message += "\r\n" + body
 
@@ -206,14 +276,14 @@ If you did not request this code, please ignore this email.
 	// For Gmail and similar services that require STARTTLS on port 587
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		log.Printf("❌ Error connecting to SMTP server (%s): %v", addr, err)
+		log.Printf("Error connecting to SMTP server: %v", err)
 		return err
 	}
 	defer conn.Close()
 
 	client, err := smtp.NewClient(conn, smtpHost)
 	if err != nil {
-		log.Printf("❌ Error creating SMTP client: %v", err)
+		log.Printf("Error creating SMTP client: %v", err)
 		return err
 	}
 	defer client.Close()
@@ -225,39 +295,34 @@ If you did not request this code, please ignore this email.
 	}
 
 	if err = client.StartTLS(tlsConfig); err != nil {
-		log.Printf("❌ Error starting TLS: %v", err)
+		log.Printf("Error starting TLS: %v", err)
 		return err
 	}
 
 	if err = client.Auth(auth); err != nil {
-		log.Printf("❌ Error authenticating with SMTP: %v", err)
+		log.Printf("Error authenticating with SMTP: %v", err)
 		return err
 	}
 
 	if err = client.Mail(from.Address); err != nil {
-		log.Printf("❌ Error setting sender: %v", err)
 		return err
 	}
 
 	if err = client.Rcpt(to.Address); err != nil {
-		log.Printf("❌ Error setting recipient: %v", err)
 		return err
 	}
 
 	wc, err := client.Data()
 	if err != nil {
-		log.Printf("❌ Error getting writer: %v", err)
 		return err
 	}
 	defer wc.Close()
 
 	if _, err = wc.Write([]byte(message)); err != nil {
-		log.Printf("❌ Error writing message: %v", err)
 		return err
 	}
 
 	client.Quit()
-	log.Printf("✅ MFA code sent to %s\n", email)
 	return nil
 }
 
@@ -271,26 +336,38 @@ func sendPasswordResetEmail(email, resetCode string) error {
 
 	// If email config not set, return error
 	if smtpHost == "" || smtpUser == "" || smtpPassword == "" {
-		log.Printf("⚠️ SMTP not configured - cannot send password reset email")
-		return nil
+		return &smtpConfigError{message: "SMTP not configured"}
 	}
 
 	subject := "Password Reset Code - Twitter Clone"
-	body := fmt.Sprintf("Your password reset code is: %s\n\nThis code expires in 15 minutes.\n\nIf you did not request a password reset, please ignore this email.", resetCode)
-	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s", 
-		smtpFrom, email, subject, body)
+	body := "Your password reset code is: " + resetCode + "\n\n" +
+		"This code expires in 15 minutes.\n\n" +
+		"If you did not request a password reset, please ignore this email."
+	
+	msg := "From: " + smtpFrom + "\r\n" +
+		"To: " + email + "\r\n" +
+		"Subject: " + subject + "\r\n\r\n" +
+		body
 
 	addr := smtpHost + ":" + smtpPort
 	auth := smtp.PlainAuth("", smtpUser, smtpPassword, smtpHost)
 
 	err := smtp.SendMail(addr, auth, smtpFrom, []string{email}, []byte(msg))
 	if err != nil {
-		log.Printf("❌ Failed to send password reset email to %s: %v", email, err)
+		log.Printf("Failed to send password reset email: %v", err)
 		return err
 	}
 
-	log.Printf("✅ Password reset email sent to %s", email)
 	return nil
+}
+
+// Custom error type for SMTP configuration issues
+type smtpConfigError struct {
+	message string
+}
+
+func (e *smtpConfigError) Error() string {
+	return e.message
 }
 
 func checkPasswordHash(password, hash string) bool {
@@ -333,23 +410,6 @@ func sanitizeInput(input string) string {
 	return input
 }
 
-// getRateLimiter gets or creates a rate limiter for an IP
-func getRateLimiter(ip string, limiterMap map[string]*rate.Limiter) *rate.Limiter {
-	limiter, exists := limiterMap[ip]
-	if !exists {
-		// 100 requests per minute (600ms between requests)
-		limiter = rate.NewLimiter(rate.Every(time.Millisecond*600), 1)
-		limiterMap[ip] = limiter
-	}
-	return limiter
-}
-
-// checkRateLimit checks if request is allowed
-func checkRateLimit(ip string, limiterMap map[string]*rate.Limiter) bool {
-	limiter := getRateLimiter(ip, limiterMap)
-	return limiter.Allow()
-}
-
 // getClientIP extracts the client IP from the request
 func getClientIP(r *http.Request) string {
 	// Check X-Forwarded-For header (for proxies)
@@ -366,7 +426,11 @@ func getClientIP(r *http.Request) string {
 	}
 	
 	// Fall back to RemoteAddr
-	return strings.Split(r.RemoteAddr, ":")[0]
+	ip := r.RemoteAddr
+	if colonIndex := strings.LastIndex(ip, ":"); colonIndex != -1 {
+		ip = ip[:colonIndex]
+	}
+	return ip
 }
 
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -411,9 +475,17 @@ func enforceHTTPS(next http.Handler) http.Handler {
 
 func enableCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		// Get allowed origin from environment, default to localhost for development
+		allowedOrigin := os.Getenv("ALLOWED_ORIGIN")
+		if allowedOrigin == "" {
+			allowedOrigin = "http://localhost:8080"
+		}
+		
+		w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Max-Age", "86400")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -427,11 +499,10 @@ func enableCORS(next http.Handler) http.Handler {
 func registerHandler(w http.ResponseWriter, r *http.Request) {
 	// Check rate limit
 	clientIP := getClientIP(r)
-	if !checkRateLimit(clientIP, loginLimiter) {
+	if !loginLimiter.allow(clientIP) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		json.NewEncoder(w).Encode(map[string]string{"message": "Too many registration attempts. Please try again later."})
-		log.Printf("⚠️ Rate limit exceeded for IP: %s\n", clientIP)
 		return
 	}
 
@@ -474,9 +545,9 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	// Generate MFA secret
 	mfaSecret := generateMFASecret()
 
-	// Generate MFA token and set 5-minute expiration (in UTC)
+	// Generate MFA token and set 30-second expiration (in UTC)
 	mfaToken := generateMFAToken(mfaSecret)
-	mfaExpires := time.Now().UTC().Add(5 * time.Minute)
+	mfaExpires := time.Now().UTC().Add(30 * time.Second)
 
 	// Insert user with MFA token
 	var userID int
@@ -492,10 +563,14 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Send MFA token via email
 	if err := sendMFAEmail(req.Email, mfaToken); err != nil {
+		// If SMTP not configured, roll back user creation
+		if _, ok := err.(*smtpConfigError); ok {
+			db.Exec("DELETE FROM users WHERE id = $1", userID)
+			http.Error(w, "Email service not configured. Please contact administrator.", http.StatusServiceUnavailable)
+			return
+		}
+		// Other email errors - still allow registration but log
 		log.Printf("Warning: Failed to send MFA email to %s: %v", req.Email, err)
-		// Return error to user since MFA is required
-		http.Error(w, "Failed to send MFA code. Please contact support.", http.StatusInternalServerError)
-		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -509,11 +584,10 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 func loginHandler(w http.ResponseWriter, r *http.Request) {
 	// Check rate limit
 	clientIP := getClientIP(r)
-	if !checkRateLimit(clientIP, loginLimiter) {
+	if !loginLimiter.allow(clientIP) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		json.NewEncoder(w).Encode(map[string]string{"message": "Too many login attempts. Please try again later."})
-		log.Printf("⚠️ Rate limit exceeded for IP: %s\n", clientIP)
 		return
 	}
 
@@ -528,8 +602,6 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	// Sanitize inputs
 	req.Email = sanitizeInput(req.Email)
 	req.MFACode = sanitizeInput(req.MFACode)
-
-	fmt.Printf("DEBUG LOGIN: Email='%s', MFACode='%s'\n", req.Email, req.MFACode)
 
 	// Get user
 	var user User
@@ -557,13 +629,6 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 
 	// If MFA code provided, verify it against stored token
 	if req.MFACode != "" {
-		fmt.Printf("DEBUG: Token valid=%v, Expires valid=%v\n", lastMFAToken.Valid, lastMFAExpires.Valid)
-		if lastMFAExpires.Valid {
-			now := time.Now().UTC()
-			expires := lastMFAExpires.Time.UTC()
-			fmt.Printf("DEBUG: Now=%v, Expires=%v, IsExpired=%v\n", now, expires, now.After(expires))
-		}
-		
 		// Check if there's a valid stored MFA token (use UTC for comparison)
 		if !lastMFAToken.Valid || !lastMFAExpires.Valid || time.Now().UTC().After(lastMFAExpires.Time.UTC()) {
 			w.Header().Set("Content-Type", "application/json")
@@ -572,8 +637,6 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		fmt.Printf("DEBUG: Received MFA code: '%s', Expected: '%s'\n", req.MFACode, lastMFAToken.String)
-		
 		if req.MFACode != lastMFAToken.String {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -604,7 +667,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 
 	// No MFA code provided - generate and send new token
 	mfaToken := generateMFAToken(user.MFASecret)
-	mfaExpires := time.Now().UTC().Add(5 * time.Minute)
+	mfaExpires := time.Now().UTC().Add(30 * time.Second)
 	
 	// Update the database with new token
 	db.Exec(
@@ -614,11 +677,13 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	
 	// Send MFA code via email
 	if err := sendMFAEmail(req.Email, mfaToken); err != nil {
-		log.Printf("Error: Failed to send MFA email to %s: %v", req.Email, err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"message": "Failed to send MFA code. Please try again."})
-		return
+		if _, ok := err.(*smtpConfigError); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"message": "Email service not configured. Please contact administrator."})
+			return
+		}
+		log.Printf("Warning: Failed to send MFA email to %s: %v", req.Email, err)
 	}
 
 	// MFA code not provided, request it
@@ -653,9 +718,9 @@ func requestPasswordResetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate reset token (valid for 1 hour)
+	// Generate reset token (valid for 15 minutes)
 	resetToken := generateResetToken()
-	expiresAt := time.Now().UTC().Add(60 * time.Minute)
+	expiresAt := time.Now().UTC().Add(15 * time.Minute)
 
 	// Store reset token
 	_, err = db.Exec(
@@ -717,7 +782,6 @@ func confirmPasswordResetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
-	log.Printf("🔐 Reset check - Now: %v, Expires: %v, Expired: %v", now, expiresAt, now.After(expiresAt))
 	
 	if now.After(expiresAt) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -744,8 +808,6 @@ func confirmPasswordResetHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"message": "Server error"})
 		return
 	}
-
-	fmt.Printf("\n✅ Password successfully reset for %s\n\n", req.Email)
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{
@@ -784,7 +846,7 @@ func getTweetsHandler(w http.ResponseWriter, r *http.Request) {
 func createTweetHandler(w http.ResponseWriter, r *http.Request) {
 	// Check rate limit
 	clientIP := getClientIP(r)
-	if !checkRateLimit(clientIP, tweetLimiter) {
+	if !tweetLimiter.allow(clientIP) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		json.NewEncoder(w).Encode(map[string]string{"message": "Too many requests. Please slow down."})
@@ -849,6 +911,9 @@ func main() {
 	// Initialize database
 	initDB()
 	defer db.Close()
+
+	// Start rate limiter cleanup routine
+	startCleanupRoutine()
 
 	// Setup router
 	router := mux.NewRouter()
