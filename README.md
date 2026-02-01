@@ -2,8 +2,6 @@
 
 A Twitter-like social media application built from the ground up with security as the primary focus. This project demonstrates comprehensive security engineering practices including authentication, authorization, input validation, rate limiting, and secure session management.
 
-> **Project Status**: Active development. Core security features are implemented and functional. The codebase demonstrates production-ready security patterns and architecture, though some features are still being refined.
-
 ## 🛡️ Security Features Implemented
 
 ### Authentication & Authorization
@@ -11,7 +9,7 @@ A Twitter-like social media application built from the ground up with security a
 - **JWT-based Sessions**: Stateless authentication with configurable expiration
 - **Secure Password Storage**: bcrypt hashing with automatic salting (cost factor: 14)
 - **Password Reset Flow**: Secure token-based password recovery with expiration
-- **Token Expiration**: 5-minute MFA tokens, 15-minute password reset tokens, 24-hour JWT sessions
+- **Token Expiration**: 30-second MFA tokens, 15-minute password reset tokens, 24-hour JWT sessions
 
 ### Input Validation & Sanitization
 - **Comprehensive Input Sanitization**: Removes control characters and potentially harmful content
