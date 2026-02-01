@@ -265,6 +265,38 @@ If you did not request this code, please ignore this email.
 	return nil
 }
 
+func sendPasswordResetEmail(email, resetCode string) error {
+	// Get email configuration from environment
+	smtpHost := os.Getenv("SMTP_HOST")
+	smtpPort := os.Getenv("SMTP_PORT")
+	smtpUser := os.Getenv("SMTP_USER")
+	smtpPassword := os.Getenv("SMTP_PASSWORD")
+	smtpFrom := os.Getenv("SMTP_FROM")
+
+	// If email config not set, return error
+	if smtpHost == "" || smtpUser == "" || smtpPassword == "" {
+		log.Printf("⚠️ SMTP not configured - cannot send password reset email")
+		return nil
+	}
+
+	subject := "Password Reset Code - Twitter Clone"
+	body := fmt.Sprintf("Your password reset code is: %s\n\nThis code expires in 15 minutes.\n\nIf you did not request a password reset, please ignore this email.", resetCode)
+	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s", 
+		smtpFrom, email, subject, body)
+
+	addr := smtpHost + ":" + smtpPort
+	auth := smtp.PlainAuth("", smtpUser, smtpPassword, smtpHost)
+
+	err := smtp.SendMail(addr, auth, smtpFrom, []string{email}, []byte(msg))
+	if err != nil {
+		log.Printf("❌ Failed to send password reset email to %s: %v", email, err)
+		return err
+	}
+
+	log.Printf("✅ Password reset email sent to %s", email)
+	return nil
+}
+
 func checkPasswordHash(password, hash string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	return err == nil
@@ -625,7 +657,7 @@ func requestPasswordResetHandler(w http.ResponseWriter, r *http.Request) {
 		// Don't reveal if email exists - security best practice
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
-			"message": "If that email exists, a reset code has been sent. Check terminal.",
+			"message": "If that email exists, a reset code has been sent.",
 		})
 		return
 	}
@@ -645,14 +677,14 @@ func requestPasswordResetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Print reset code to terminal (simulates email)
-	fmt.Printf("\n🔑 PASSWORD RESET CODE for %s: %s\n", req.Email, resetToken)
-	fmt.Printf("   Expires at: %s\n\n", expiresAt.Format("15:04:05"))
+	// Send reset code via email
+	if err := sendPasswordResetEmail(req.Email, resetToken); err != nil {
+		log.Printf("Warning: Failed to send reset email to %s: %v", req.Email, err)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message":     "Reset code sent. Check terminal.",
-		"reset_token": resetToken,
+		"message": "If that email exists, a reset code has been sent.",
 	})
 }
 
