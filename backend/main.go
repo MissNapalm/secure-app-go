@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/mail"
 	"net/smtp"
@@ -196,49 +197,56 @@ If you did not request this code, please ignore this email.
 	addr := smtpHost + ":" + smtpPort
 	auth := smtp.PlainAuth("", smtpUser, smtpPassword, smtpHost)
 
-	// For Gmail and similar services that require TLS
+	// For Gmail and similar services that require STARTTLS on port 587
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		log.Printf("❌ Error connecting to SMTP server (%s): %v", addr, err)
+		return err
+	}
+	defer conn.Close()
+
+	client, err := smtp.NewClient(conn, smtpHost)
+	if err != nil {
+		log.Printf("❌ Error creating SMTP client: %v", err)
+		return err
+	}
+	defer client.Close()
+
+	// Upgrade connection to TLS
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: false,
 		ServerName:         smtpHost,
 	}
 
-	conn, err := tls.Dial("tcp", addr, tlsConfig)
-	if err != nil {
-		log.Printf("Error connecting to SMTP server: %v", err)
+	if err = client.StartTLS(tlsConfig); err != nil {
+		log.Printf("❌ Error starting TLS: %v", err)
 		return err
 	}
-
-	client, err := smtp.NewClient(conn, smtpHost)
-	if err != nil {
-		log.Printf("Error creating SMTP client: %v", err)
-		return err
-	}
-	defer client.Close()
 
 	if err = client.Auth(auth); err != nil {
-		log.Printf("Error authenticating with SMTP: %v", err)
+		log.Printf("❌ Error authenticating with SMTP: %v", err)
 		return err
 	}
 
 	if err = client.Mail(from.Address); err != nil {
-		log.Printf("Error setting sender: %v", err)
+		log.Printf("❌ Error setting sender: %v", err)
 		return err
 	}
 
 	if err = client.Rcpt(to.Address); err != nil {
-		log.Printf("Error setting recipient: %v", err)
+		log.Printf("❌ Error setting recipient: %v", err)
 		return err
 	}
 
 	wc, err := client.Data()
 	if err != nil {
-		log.Printf("Error getting writer: %v", err)
+		log.Printf("❌ Error getting writer: %v", err)
 		return err
 	}
 	defer wc.Close()
 
 	if _, err = wc.Write([]byte(message)); err != nil {
-		log.Printf("Error writing message: %v", err)
+		log.Printf("❌ Error writing message: %v", err)
 		return err
 	}
 
