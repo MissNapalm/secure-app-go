@@ -22,8 +22,8 @@ A full-stack social media application demonstrating security engineering princip
 
 ### Rate Limiting
 - IP-based rate limiting with configurable thresholds per endpoint
-- Login/Registration: 100 requests per minute per IP
-- Tweet Creation: 100 requests per minute per IP  
+- Login/Registration: 5 requests per minute per IP
+- Tweet Creation: 60 requests per minute per IP  
 - Per-IP tracking prevents distributed brute force attacks
 - Automatic cleanup of rate limiter state
 
