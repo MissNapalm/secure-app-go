@@ -2,12 +2,15 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"net/mail"
+	"net/smtp"
 	"os"
 	"time"
 
@@ -140,6 +143,106 @@ func hashPassword(password string) (string, error) {
 	return string(bytes), err
 }
 
+func sendMFAEmail(email, mfaCode string) error {
+	// Get email configuration from environment
+	smtpHost := os.Getenv("SMTP_HOST")
+	smtpPort := os.Getenv("SMTP_PORT")
+	smtpUser := os.Getenv("SMTP_USER")
+	smtpPassword := os.Getenv("SMTP_PASSWORD")
+	smtpFrom := os.Getenv("SMTP_FROM")
+
+	// If email config not set, fall back to printing to console
+	if smtpHost == "" || smtpUser == "" || smtpPassword == "" {
+		fmt.Printf("\n⚠️  Email not configured. MFA CODE for %s: %s\n\n", email, mfaCode)
+		return nil
+	}
+
+	// Compose email
+	subject := "Your MFA Code"
+	body := fmt.Sprintf(`
+Your MFA authentication code is: %s
+
+This code will expire in 5 minutes.
+
+Do not share this code with anyone.
+
+If you did not request this code, please ignore this email.
+`, mfaCode)
+
+	// Create email message
+	from := mail.Address{Name: "Twitter Clone", Address: smtpFrom}
+	to := mail.Address{Address: email}
+
+	// Headers
+	headers := make(map[string]string)
+	headers["From"] = from.String()
+	headers["To"] = to.String()
+	headers["Subject"] = subject
+	headers["MIME-Version"] = "1.0"
+	headers["Content-Type"] = "text/plain; charset=\"utf-8\""
+
+	// Build message
+	message := ""
+	for k, v := range headers {
+		message += fmt.Sprintf("%s: %s\r\n", k, v)
+	}
+	message += "\r\n" + body
+
+	// Send email via SMTP
+	addr := smtpHost + ":" + smtpPort
+	auth := smtp.PlainAuth("", smtpUser, smtpPassword, smtpHost)
+
+	// For Gmail and similar services that require TLS
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: false,
+		ServerName:         smtpHost,
+	}
+
+	conn, err := tls.Dial("tcp", addr, tlsConfig)
+	if err != nil {
+		log.Printf("Error connecting to SMTP server: %v", err)
+		return err
+	}
+
+	client, err := smtp.NewClient(conn, smtpHost)
+	if err != nil {
+		log.Printf("Error creating SMTP client: %v", err)
+		return err
+	}
+	defer client.Close()
+
+	if err = client.Auth(auth); err != nil {
+		log.Printf("Error authenticating with SMTP: %v", err)
+		return err
+	}
+
+	if err = client.Mail(from.Address); err != nil {
+		log.Printf("Error setting sender: %v", err)
+		return err
+	}
+
+	if err = client.Rcpt(to.Address); err != nil {
+		log.Printf("Error setting recipient: %v", err)
+		return err
+	}
+
+	wc, err := client.Data()
+	if err != nil {
+		log.Printf("Error getting writer: %v", err)
+		return err
+	}
+	defer wc.Close()
+
+	if _, err = wc.Write([]byte(message)); err != nil {
+		log.Printf("Error writing message: %v", err)
+		return err
+	}
+
+	client.Quit()
+	log.Printf("✅ MFA code sent to %s\n", email)
+	return nil
+}
+
 func checkPasswordHash(password, hash string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	return err == nil
@@ -241,12 +344,14 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Print MFA token to terminal
-	fmt.Printf("\n🔐 MFA TOKEN for %s: %s\n\n", req.Email, mfaToken)
+	// Send MFA token via email
+	if err := sendMFAEmail(req.Email, mfaToken); err != nil {
+		log.Printf("Warning: Failed to send MFA email to %s: %v", req.Email, err)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message":   "Registration successful. Check terminal for MFA code.",
+		"message":   "Registration successful. Check your email for MFA code.",
 		"user_id":   userID,
 		"username":  req.Username,
 		"mfa_token": mfaToken,
@@ -342,7 +447,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	if lastMFAToken.Valid && lastMFAExpires.Valid && time.Now().UTC().Before(lastMFAExpires.Time.UTC()) {
 		// Use the existing token
 		mfaToken = lastMFAToken.String
-		fmt.Printf("\n🔐 MFA TOKEN for %s: %s (reusing from registration)\n\n", req.Email, mfaToken)
+		log.Printf("Reusing existing MFA token for %s\n", req.Email)
 	} else {
 		// Generate new MFA token and store it (in UTC)
 		mfaToken = generateMFAToken(user.MFASecret)
@@ -354,14 +459,17 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 			mfaToken, mfaExpires, req.Email,
 		)
 		
-		fmt.Printf("\n🔐 MFA TOKEN for %s: %s\n\n", req.Email, mfaToken)
+		// Send MFA code via email
+		if err := sendMFAEmail(req.Email, mfaToken); err != nil {
+			log.Printf("Warning: Failed to send MFA email to %s: %v", req.Email, err)
+		}
 	}
 
 	// MFA code not provided, request it
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{
-		"message":   "MFA required. Check terminal for code.",
+		"message":   "MFA required. Check your email for code.",
 		"mfa_token": mfaToken,
 	})
 }
