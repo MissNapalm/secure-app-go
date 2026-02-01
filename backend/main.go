@@ -662,9 +662,9 @@ func requestPasswordResetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate reset token (valid for 15 minutes)
+	// Generate reset token (valid for 1 hour)
 	resetToken := generateResetToken()
-	expiresAt := time.Now().Add(15 * time.Minute)
+	expiresAt := time.Now().UTC().Add(60 * time.Minute)
 
 	// Store reset token
 	_, err = db.Exec(
@@ -725,7 +725,10 @@ func confirmPasswordResetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if time.Now().After(expiresAt) {
+	now := time.Now().UTC()
+	log.Printf("🔐 Reset check - Now: %v, Expires: %v, Expired: %v", now, expiresAt, now.After(expiresAt))
+	
+	if now.After(expiresAt) {
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{"message": "Reset code expired"})
 		return
