@@ -11,7 +11,7 @@ A full-stack social media application demonstrating security engineering princip
 - JWT-based stateless sessions with 24-hour expiration
 - bcrypt password hashing (cost factor: 14) with constant-time comparison
 - Secure password reset with time-limited tokens
-- Token expiration: 30-second MFA codes, 15-minute password reset tokens
+- Token expiration: 5 minute MFA codes, 1 hour password reset tokens (relaxed for development build, change to 30 seconds and 15 minutes in production build)
 - Generic error messages prevent account enumeration
 
 ### Input Validation & Sanitization
