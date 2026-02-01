@@ -689,14 +689,18 @@ func requestPasswordResetHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func confirmPasswordResetHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
 	var req ConfirmResetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"message": "Invalid request"})
 		return
 	}
 
 	if req.Email == "" || req.ResetCode == "" || req.NewPassword == "" {
-		http.Error(w, "All fields required", http.StatusBadRequest)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"message": "All fields required"})
 		return
 	}
 
@@ -709,25 +713,29 @@ func confirmPasswordResetHandler(w http.ResponseWriter, r *http.Request) {
 	).Scan(&resetToken, &expiresAt)
 
 	if err != nil {
-		http.Error(w, "Invalid reset request", http.StatusBadRequest)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"message": "Invalid reset request"})
 		return
 	}
 
 	// Check token validity
 	if resetToken != req.ResetCode {
-		http.Error(w, "Invalid reset code", http.StatusUnauthorized)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"message": "Invalid reset code"})
 		return
 	}
 
 	if time.Now().After(expiresAt) {
-		http.Error(w, "Reset code expired", http.StatusUnauthorized)
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"message": "Reset code expired"})
 		return
 	}
 
 	// Hash new password
 	newPasswordHash, err := hashPassword(req.NewPassword)
 	if err != nil {
-		http.Error(w, "Server error", http.StatusInternalServerError)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"message": "Server error"})
 		return
 	}
 
@@ -738,13 +746,14 @@ func confirmPasswordResetHandler(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err != nil {
-		http.Error(w, "Server error", http.StatusInternalServerError)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"message": "Server error"})
 		return
 	}
 
 	fmt.Printf("\n✅ Password successfully reset for %s\n\n", req.Email)
 
-	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{
 		"message": "Password reset successful. You can now login.",
 	})
