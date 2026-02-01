@@ -177,7 +177,7 @@ func sendMFAEmail(email, mfaCode string) error {
 	body := fmt.Sprintf(`
 Your MFA authentication code is: %s
 
-This code will expire in 5 minutes.
+This code will expire in 30 seconds.
 
 Do not share this code with anyone.
 
@@ -607,7 +607,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	// No MFA code provided - determine which token to send
 	var mfaToken string
 	
-	// Check if there's a valid stored MFA token (within 5 minutes)
+	// Check if there's a valid stored MFA token (within 30 seconds)
 	if lastMFAToken.Valid && lastMFAExpires.Valid && time.Now().UTC().Before(lastMFAExpires.Time.UTC()) {
 		// Use the existing token
 		mfaToken = lastMFAToken.String
