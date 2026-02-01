@@ -341,8 +341,8 @@ func sanitizeInput(input string) string {
 func getRateLimiter(ip string, limiterMap map[string]*rate.Limiter) *rate.Limiter {
 	limiter, exists := limiterMap[ip]
 	if !exists {
-		// 5 requests per minute
-		limiter = rate.NewLimiter(rate.Every(time.Second*12), 1)
+		// 100 requests per minute (600ms between requests)
+		limiter = rate.NewLimiter(rate.Every(time.Millisecond*600), 1)
 		limiterMap[ip] = limiter
 	}
 	return limiter
@@ -860,8 +860,12 @@ func main() {
 	router.HandleFunc("/api/tweets", authMiddleware(getTweetsHandler)).Methods("GET")
 	router.HandleFunc("/api/tweets", authMiddleware(createTweetHandler)).Methods("POST")
 
-	// Serve frontend
-	router.PathPrefix("/").Handler(http.FileServer(http.Dir("../frontend")))
+	// Serve frontend - try both paths for compatibility
+	frontendPath := "../frontend"
+	if _, err := os.Stat(frontendPath); os.IsNotExist(err) {
+		frontendPath = "./frontend"
+	}
+	router.PathPrefix("/").Handler(http.FileServer(http.Dir(frontendPath)))
 
 	// Add HTTPS enforcement middleware
 	router.Use(enforceHTTPS)
