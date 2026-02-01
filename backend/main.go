@@ -152,6 +152,9 @@ func sendMFAEmail(email, mfaCode string) error {
 	smtpPassword := os.Getenv("SMTP_PASSWORD")
 	smtpFrom := os.Getenv("SMTP_FROM")
 
+	// Debug logging
+	log.Printf("DEBUG: SMTP_HOST=%s, SMTP_USER=%s, SMTP_PASSWORD_LENGTH=%d\n", smtpHost, smtpUser, len(smtpPassword))
+
 	// If email config not set, fall back to printing to console
 	if smtpHost == "" || smtpUser == "" || smtpPassword == "" {
 		fmt.Printf("\n⚠️  Email not configured. MFA CODE for %s: %s\n\n", email, mfaCode)
@@ -657,9 +660,15 @@ func createTweetHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Load environment variables from .env file
-	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, using environment variables")
+	// Load environment variables from .env file (check parent directory too)
+	if err := godotenv.Load("../.env"); err != nil {
+		if err := godotenv.Load(); err != nil {
+			log.Println("No .env file found, using environment variables")
+		} else {
+			log.Println("✅ .env file loaded successfully from current directory")
+		}
+	} else {
+		log.Println("✅ .env file loaded successfully from parent directory")
 	}
 
 	// Initialize database
