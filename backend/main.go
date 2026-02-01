@@ -163,13 +163,9 @@ func sendMFAEmail(email, mfaCode string) error {
 	smtpPassword := os.Getenv("SMTP_PASSWORD")
 	smtpFrom := os.Getenv("SMTP_FROM")
 
-	// Debug logging
-	log.Printf("DEBUG: SMTP_HOST=%s, SMTP_USER=%s, SMTP_PASSWORD_LENGTH=%d\n", smtpHost, smtpUser, len(smtpPassword))
-
-	// If email config not set, fall back to printing to console
+	// If email config not set, return error
 	if smtpHost == "" || smtpUser == "" || smtpPassword == "" {
-		fmt.Printf("\n⚠️  Email not configured. MFA CODE for %s: %s\n\n", email, mfaCode)
-		return nil
+		return fmt.Errorf("SMTP not configured - cannot send MFA email")
 	}
 
 	// Compose email
@@ -497,14 +493,16 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	// Send MFA token via email
 	if err := sendMFAEmail(req.Email, mfaToken); err != nil {
 		log.Printf("Warning: Failed to send MFA email to %s: %v", req.Email, err)
+		// Return error to user since MFA is required
+		http.Error(w, "Failed to send MFA code. Please contact support.", http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message":   "Registration successful. Check your email for MFA code.",
-		"user_id":   userID,
-		"username":  req.Username,
-		"mfa_token": mfaToken,
+		"message":  "Registration successful. Check your email for MFA code.",
+		"user_id":  userID,
+		"username": req.Username,
 	})
 }
 
@@ -604,37 +602,30 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No MFA code provided - determine which token to send
-	var mfaToken string
+	// No MFA code provided - generate and send new token
+	mfaToken := generateMFAToken(user.MFASecret)
+	mfaExpires := time.Now().UTC().Add(5 * time.Minute)
 	
-	// Check if there's a valid stored MFA token (within 30 seconds)
-	if lastMFAToken.Valid && lastMFAExpires.Valid && time.Now().UTC().Before(lastMFAExpires.Time.UTC()) {
-		// Use the existing token
-		mfaToken = lastMFAToken.String
-		log.Printf("Reusing existing MFA token for %s\n", req.Email)
-	} else {
-		// Generate new MFA token and store it (in UTC)
-		mfaToken = generateMFAToken(user.MFASecret)
-		mfaExpires := time.Now().UTC().Add(5 * time.Minute)
-		
-		// Update the database with new token
-		db.Exec(
-			"UPDATE users SET last_mfa_token = $1, last_mfa_token_expires = $2 WHERE email = $3",
-			mfaToken, mfaExpires, req.Email,
-		)
-		
-		// Send MFA code via email
-		if err := sendMFAEmail(req.Email, mfaToken); err != nil {
-			log.Printf("Warning: Failed to send MFA email to %s: %v", req.Email, err)
-		}
+	// Update the database with new token
+	db.Exec(
+		"UPDATE users SET last_mfa_token = $1, last_mfa_token_expires = $2 WHERE email = $3",
+		mfaToken, mfaExpires, req.Email,
+	)
+	
+	// Send MFA code via email
+	if err := sendMFAEmail(req.Email, mfaToken); err != nil {
+		log.Printf("Error: Failed to send MFA email to %s: %v", req.Email, err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"message": "Failed to send MFA code. Please try again."})
+		return
 	}
 
 	// MFA code not provided, request it
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{
-		"message":   "MFA required. Check your email for code.",
-		"mfa_token": mfaToken,
+		"message": "MFA required. Check your email for code.",
 	})
 }
 
