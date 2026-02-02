@@ -12,7 +12,6 @@ A full-stack social media application demonstrating security engineering princip
 - bcrypt password hashing (cost factor: 14) with constant-time comparison
 - Secure password reset with time-limited tokens
 - Token expiration: MFA codes and password reset tokens automatically reset
-- Generic error messages prevent account enumeration
 
 ### Input Validation & Sanitization
 - Server-side input sanitization removes control characters
