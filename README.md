@@ -2,8 +2,6 @@
 
 A full-stack social media application demonstrating security engineering principles. Built with Go and PostgreSQL, this project implements multi-layered security controls including MFA, rate limiting, input validation, and secure session management.
 
-**Status**: Core security features implemented and tested. Currently refining authentication flow and rate limiting configurations.
-
 ## Security Features
 
 ### Authentication & Authorization
