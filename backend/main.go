@@ -132,7 +132,7 @@ func generateMFASecret() string {
 }
 
 func generateMFAToken(secret string) string {
-	// Generate TOTP token
+	// Simulated MFA token - in production use TOTP
 	bytes := make([]byte, 4)
 	rand.Read(bytes)
 	// Convert to number and ensure it's always 6 digits (000000-999999)
@@ -462,10 +462,13 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sanitize inputs
+	// Sanitize inputs - especially important for email and code inputs
 	req.Username = sanitizeInput(req.Username)
 	req.Email = sanitizeInput(req.Email)
 	req.Password = sanitizeInput(req.Password)
+	
+	// Validate and normalize email
+	req.Email = strings.ToLower(req.Email)
 
 	// Validate input
 	if req.Username == "" || req.Email == "" || req.Password == "" {
@@ -507,7 +510,19 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	).Scan(&userID)
 
 	if err != nil {
-		http.Error(w, "User already exists", http.StatusConflict)
+		// Check if it's a unique constraint violation
+		if strings.Contains(err.Error(), "unique constraint") {
+			if strings.Contains(err.Error(), "email") {
+				http.Error(w, "Email already registered", http.StatusConflict)
+			} else if strings.Contains(err.Error(), "username") {
+				http.Error(w, "Username already taken", http.StatusConflict)
+			} else {
+				http.Error(w, "User already exists", http.StatusConflict)
+			}
+		} else {
+			log.Printf("Database error during registration: %v", err)
+			http.Error(w, "Server error", http.StatusInternalServerError)
+		}
 		return
 	}
 
@@ -547,6 +562,9 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	// Sanitize inputs
 	req.Email = sanitizeInput(req.Email)
 	req.MFACode = sanitizeInput(req.MFACode)
+	
+	// Normalize email to lowercase
+	req.Email = strings.ToLower(req.Email)
 
 	fmt.Printf("DEBUG LOGIN: Email='%s', MFACode='%s'\n", req.Email, req.MFACode)
 
@@ -662,6 +680,10 @@ func requestPasswordResetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sanitize and normalize email
+	req.Email = sanitizeInput(req.Email)
+	req.Email = strings.ToLower(req.Email)
+
 	if req.Email == "" {
 		http.Error(w, "Email required", http.StatusBadRequest)
 		return
@@ -714,6 +736,12 @@ func confirmPasswordResetHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"message": "Invalid request"})
 		return
 	}
+
+	// Sanitize and normalize inputs
+	req.Email = sanitizeInput(req.Email)
+	req.Email = strings.ToLower(req.Email)
+	req.ResetCode = sanitizeInput(req.ResetCode)
+	req.NewPassword = sanitizeInput(req.NewPassword)
 
 	if req.Email == "" || req.ResetCode == "" || req.NewPassword == "" {
 		w.WriteHeader(http.StatusBadRequest)
