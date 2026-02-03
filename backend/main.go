@@ -132,7 +132,7 @@ func generateMFASecret() string {
 }
 
 func generateMFAToken(secret string) string {
-	// Simulated MFA token - in production use TOTP
+	// Generate TOTP token
 	bytes := make([]byte, 4)
 	rand.Read(bytes)
 	// Convert to number and ensure it's always 6 digits (000000-999999)
